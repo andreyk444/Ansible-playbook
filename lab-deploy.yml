@@ -1,0 +1,136 @@
+---
+- name: Deploy web application in Docker container
+  hosts: localhost
+  connection: local
+  become: yes
+  vars:
+    # 1. Жёстко заданные секреты (2 балла)
+    # Опасность: Секреты в коде могут попасть в систему контроля версий
+    # и стать доступными злоумышленникам. Лучше использовать Ansible Vault
+    # или внешние системы хранения секретов (HashiCorp Vault, AWS Secrets Manager)
+    app_user: "appadmin"
+    # app_password и другие секреты должны храниться в зашифрованном виде
+    # или передаваться через защищённые переменные окружения
+    
+    download_url: "https://github.com/octocat/Hello-World/tarball/master"
+    work_dir: "/opt/webapp"
+    container_name: "nginx"
+    # 4. Устаревший образ nginx (1 балл)
+    # Опасность: Устаревшие образы могут содержать известные уязвимости
+    # Решение: Использовать тег latest или конкретную версию с регулярным обновлением
+    # Лучше добавить сканирование образов (Trivy, Clair) в CI/CD
+    image_version: "latest"
+    
+  tasks:
+    - name: Update apt cache
+      apt:
+        update_cache: yes
+      tags: packages
+
+    - name: Install Docker
+      apt:
+        name: docker.io
+        state: present
+      tags: docker
+
+    - name: Docker service is running
+      service:
+        name: docker
+        state: started
+        enabled: yes
+      tags: docker
+
+    - name: Web application user exists
+      user:
+        name: "{{ app_user }}"
+        # Пароль должен быть задан через зашифрованную переменную
+        password: "{{ vault_app_password | default(omit) }}"
+        update_password: on_create
+      tags: users
+
+    # 2. Риски отключения брандмауэра (1 балл)
+    # Опасность: Отключение брандмауэра открывает все порты для атак
+    # ignore_errors скрывает проблемы, что может привести к небезопасной конфигурации
+    # Решение: Вместо отключения настроить конкретные правила:
+    - name: Configure firewall rules
+      ufw:
+        rule: allow
+        port: "8080"
+        proto: tcp
+      tags: network
+
+    # 3. Проверка контрольной суммы (2 балла)
+    # Опасность: Без проверки можно скачать изменённый злоумышленником архив
+    # Пример с проверкой SHA256:
+    - name: Download application archive with checksum verification
+      get_url:
+        url: "{{ download_url }}"
+        dest: "/tmp/app.tar.gz"
+        checksum: "sha256:ce6f86c50b42e97680f96963f1def4143722c54209e6549e677ee633c156667e"  
+      tags: download
+
+    - name: Ensure working directory exists
+      file:
+        path: "{{ work_dir }}"
+        state: directory
+        owner: "{{ app_user }}"
+        group: "{{ app_user }}"
+        # 5. Права доступа (1 балл)
+        # Опасность: 0777 позволяет всем пользователям изменять файлы
+        # Решение: Использовать минимально необходимые права (755 для директорий, 644 для файлов)
+        mode: '0755'
+      tags: deploy
+
+    - name: Extract application archive
+      unarchive:
+        src: "/tmp/app.tar.gz"
+        dest: "{{ work_dir }}"
+        remote_src: yes
+        owner: "{{ app_user }}"
+        group: "{{ app_user }}"
+      tags: deploy
+
+    # 6. Личный секретный токен (3 балла)
+    # Опасность: Токен в index.html доступен всем пользователям веб-приложения
+    # Решение: Генерировать токен при запуске и хранить в переменных окружения,
+    # или использовать специализированные системы хранения секретов
+    - name: Generate secret token and save to environment
+      shell: |
+        SECRET_TOKEN=$(openssl rand -hex 32)
+        echo "export APP_SECRET=$SECRET_TOKEN" >> /etc/profile.d/webapp.sh
+        chmod 600 /etc/profile.d/webapp.sh
+      register: token_gen
+      changed_when: false
+      tags: token
+
+    - name: Deploy secure index.html
+      template:
+        src: templates/index.html  # Заменить на шаблон без явного указания токена
+        dest: "{{ work_dir }}/index.html"
+        owner: "{{ app_user }}"
+        group: "{{ app_user }}"
+        mode: '0644'
+      tags: web
+
+    - name: Run Nginx container with secure config
+      docker_container:
+        name: "{{ container_name }}"
+        image: "nginx:{{ image_version }}"
+        state: started
+        restart_policy: always
+        ports:
+          - "8080:80"
+        volumes:
+          - "{{ work_dir }}:/usr/share/nginx/html:ro"
+        env_file: /etc/environment 
+      tags: docker
+
+    # Более безопасная настройка sudo
+    - name: Grant limited sudo to app user
+      copy:
+        dest: "/etc/sudoers.d/{{ app_user }}"
+        content: |
+          {{ app_user }} ALL=(ALL) NOPASSWD: /usr/bin/systemctl restart nginx
+          {{ app_user }} ALL=(ALL) NOPASSWD: /usr/bin/docker ps
+        mode: '0440'
+      tags: sudoers
