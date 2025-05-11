@@ -1,6 +1,4 @@
-Дата: 1.05.2025
-
-# Безопасности Ansible Playbook
+# Безопасность Ansible Playbook
 
 1) Убедимся, что контейнер развернулся 
 ![ ](img/check-containers.png)
